@@ -941,6 +941,83 @@ static int BuildTls13HandshakeHmac(WOLFSSL* ssl, byte* key, byte* hash,
     return ret;
 }
 
+/* OPENSSL_EXTRA is a hack, should probably introduce a new macro and unguard
+ * Base16_Encode in wolfssl/wolfcrypt/coding.h */
+#if defined(DEBUG_WOLFSSL) && defined(OPENSSL_EXTRA)
+#include <stdlib.h>
+#include <wolfssl/wolfcrypt/coding.h>
+
+static INLINE void RecordKeyLog(WOLFSSL* ssl, const char* label,
+                                word32 labelLen, byte* secret)
+{
+    byte line[200];
+    word32 offset = 0, outlen;
+    int secretSz = 0;
+
+    static FILE *keylog_file;
+    static int inited;
+    if (!inited) {
+        const char *keylog_filename = getenv("SSLKEYLOGFILE");
+        if (keylog_filename) {
+            keylog_file = fopen(keylog_filename, "a");
+            if (!keylog_file) {
+                perror("fopen(SSLKEYLOGFILE) failed");
+            }
+        }
+        inited = 1;
+    }
+
+    if (!keylog_file)
+        return;
+
+    switch (ssl->specs.mac_algorithm) {
+    #ifndef NO_SHA256
+        case sha256_mac:
+            secretSz = SHA256_DIGEST_SIZE;
+            break;
+    #endif /* !NO_SHA256 */
+    #ifdef WOLFSSL_SHA384
+        case sha384_mac:
+            secretSz = SHA384_DIGEST_SIZE;
+            break;
+    #endif /* WOLFSSL_SHA384 */
+    #ifdef WOLFSSL_TLS13_SHA512
+        case sha512_mac:
+            secretSz = SHA512_DIGEST_SIZE;
+            break;
+    #endif /* WOLFSSL_TLS13_SHA512 */
+        default:
+            return;
+    }
+
+    /* label */
+    XMEMCPY(line, label, labelLen);
+    offset = labelLen;
+    line[offset++] = ' ';
+    /* client random */
+    outlen = sizeof(line) - offset;
+    Base16_Encode(ssl->arrays->clientRandom, RAN_LEN, line + offset, &outlen);
+    offset += RAN_LEN*2;
+    line[offset++] = ' ';
+    /* secret */
+    outlen = sizeof(line) - offset;
+    Base16_Encode(secret, secretSz, line + offset, &outlen);
+    offset += secretSz*2;
+    line[offset++] = '\n';
+    fwrite(line, offset, 1, keylog_file);
+    fflush(keylog_file);
+}
+#else
+static INLINE void RecordKeyLog(WOLFSSL* ssl, const char* label,
+                                word32 labelLen, byte* secret)
+{
+    (void)ssl;
+    (void)label;
+    (void)labelLen;
+    (void)secret;
+}
+#endif
+
 /* The length of the label to use when deriving keys. */
 #define WRITE_KEY_LABEL_SZ     3
 /* The length of the label to use when deriving IVs. */
@@ -1001,6 +1078,8 @@ static int DeriveTls13Keys(WOLFSSL* ssl, int secret, int side, int store)
             ret = DeriveEarlyTrafficSecret(ssl, ssl->arrays->clientSecret);
             if (ret != 0)
                 goto end;
+            RecordKeyLog(ssl, "CLIENT_EARLY_TRAFFIC_SECRET", 27,
+                         ssl->arrays->clientSecret);
             break;
 #endif
 
@@ -1010,12 +1089,16 @@ static int DeriveTls13Keys(WOLFSSL* ssl, int secret, int side, int store)
                                                   ssl->arrays->clientSecret);
                 if (ret != 0)
                     goto end;
+                RecordKeyLog(ssl, "CLIENT_HANDSHAKE_TRAFFIC_SECRET", 31,
+                             ssl->arrays->clientSecret);
             }
             if (provision & PROVISION_SERVER) {
                 ret = DeriveServerHandshakeSecret(ssl,
                                                   ssl->arrays->serverSecret);
                 if (ret != 0)
                     goto end;
+                RecordKeyLog(ssl, "SERVER_HANDSHAKE_TRAFFIC_SECRET", 31,
+                             ssl->arrays->serverSecret);
             }
             break;
 
@@ -1024,11 +1107,15 @@ static int DeriveTls13Keys(WOLFSSL* ssl, int secret, int side, int store)
                 ret = DeriveClientTrafficSecret(ssl, ssl->arrays->clientSecret);
                 if (ret != 0)
                     goto end;
+                RecordKeyLog(ssl, "CLIENT_TRAFFIC_SECRET_0", 23,
+                             ssl->arrays->clientSecret);
             }
             if (provision & PROVISION_SERVER) {
                 ret = DeriveServerTrafficSecret(ssl, ssl->arrays->serverSecret);
                 if (ret != 0)
                     goto end;
+                RecordKeyLog(ssl, "SERVER_TRAFFIC_SECRET_0", 23,
+                             ssl->arrays->serverSecret);
             }
             break;
 
